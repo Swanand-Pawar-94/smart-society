@@ -1,0 +1,164 @@
+<?php
+
+use App\Http\Controllers\Api\Amenities\AmenityController;
+use App\Http\Controllers\Api\Authentication\AuthController;
+use App\Http\Controllers\Api\Complaints\ComplaintController;
+use App\Http\Controllers\Api\Dashboard\AdminDashboardController;
+use App\Http\Controllers\Api\Dashboard\ResidentDashboardController;
+use App\Http\Controllers\Api\Dashboard\SecurityDashboardController;
+use App\Http\Controllers\Api\Dashboard\StaffDashboardController;
+use App\Http\Controllers\Api\Flats\FlatController;
+use App\Http\Controllers\Api\Maintenance\AdminMaintenanceBillController;
+use App\Http\Controllers\Api\Maintenance\AdminMaintenancePaymentController;
+use App\Http\Controllers\Api\Maintenance\AdminPaymentOrderController;
+use App\Http\Controllers\Api\Maintenance\ResidentMaintenanceBillController;
+use App\Http\Controllers\Api\Maintenance\ResidentMaintenancePaymentController;
+use App\Http\Controllers\Api\Maintenance\ResidentPaymentOrderController;
+use App\Http\Controllers\Api\Messaging\MessagingController;
+use App\Http\Controllers\Api\Notices\NoticeController;
+use App\Http\Controllers\Api\Notifications\NotificationController;
+use App\Http\Controllers\Api\Options\SelectionOptionsController;
+use App\Http\Controllers\Api\Parcels\ParcelController;
+use App\Http\Controllers\Api\Parking\ParkingController;
+use App\Http\Controllers\Api\Reports\AdminReportController;
+use App\Http\Controllers\Api\Residents\ResidentController;
+use App\Http\Controllers\Api\Staff\AdminStaffMemberController;
+use App\Http\Controllers\Api\Visitors\AdminVisitorController;
+use App\Http\Controllers\Api\Visitors\ResidentVisitorController;
+use App\Http\Controllers\Api\Visitors\SecurityVisitorController;
+use Illuminate\Support\Facades\Route;
+
+Route::prefix('auth')->group(function (): void {
+    Route::post('login', [AuthController::class, 'login']);
+    Route::post('register', [AuthController::class, 'register']);
+    Route::post('forgot-password', [AuthController::class, 'forgotPassword']);
+    Route::post('reset-password', [AuthController::class, 'resetPassword']);
+
+    Route::middleware('auth:sanctum')->group(function (): void {
+        Route::post('logout', [AuthController::class, 'logout']);
+        Route::get('me', [AuthController::class, 'me']);
+        Route::patch('profile', [AuthController::class, 'updateProfile']);
+    });
+});
+
+Route::middleware('auth:sanctum')->group(function (): void {
+    Route::get('notifications', [NotificationController::class, 'index']);
+    Route::patch('notifications/{notification}/read', [NotificationController::class, 'read']);
+    Route::patch('notifications/read-all', [NotificationController::class, 'readAll']);
+    Route::get('conversations', [MessagingController::class, 'index']);
+    Route::post('conversations', [MessagingController::class, 'store']);
+    Route::get('conversations/{conversation}', [MessagingController::class, 'show']);
+    Route::post('conversations/{conversation}/messages', [MessagingController::class, 'send']);
+    Route::patch('conversations/{conversation}/read', [MessagingController::class, 'markRead']);
+    Route::get('amenities', [AmenityController::class, 'index']);
+    Route::get('resident/profile', [ResidentController::class, 'profile']);
+    Route::patch('resident/profile', [ResidentController::class, 'updateProfile']);
+    Route::middleware('role:RESIDENT')->get('resident/dashboard', ResidentDashboardController::class);
+
+    Route::middleware('role:SECURITY')->get('security/dashboard', SecurityDashboardController::class);
+    Route::middleware('role:SECURITY')->prefix('security/visitors')->group(function (): void {
+        Route::get('options', [SelectionOptionsController::class, 'security']);
+        Route::get('/', [SecurityVisitorController::class, 'index']);
+        Route::post('/', [SecurityVisitorController::class, 'store']);
+        Route::get('{visitor}', [SecurityVisitorController::class, 'show']);
+        Route::patch('{visitor}/entry', [SecurityVisitorController::class, 'recordEntry']);
+        Route::patch('{visitor}/exit', [SecurityVisitorController::class, 'recordExit']);
+    });
+
+    Route::middleware('role:RESIDENT')->prefix('resident/visitors')->group(function (): void {
+        Route::get('/', [ResidentVisitorController::class, 'index']);
+        Route::get('pending', [ResidentVisitorController::class, 'pending']);
+        Route::post('pre-approvals', [ResidentVisitorController::class, 'preApprove']);
+        Route::get('{visitor}', [ResidentVisitorController::class, 'show']);
+        Route::patch('{visitor}/approve', [ResidentVisitorController::class, 'approve']);
+        Route::patch('{visitor}/reject', [ResidentVisitorController::class, 'reject']);
+    });
+
+    Route::middleware('role:RESIDENT')->prefix('resident')->group(function (): void {
+        Route::get('maintenance-bills', [ResidentMaintenanceBillController::class, 'index']);
+        Route::get('maintenance-bills/{bill}', [ResidentMaintenanceBillController::class, 'show']);
+        Route::get('maintenance-payments', [ResidentMaintenancePaymentController::class, 'index']);
+        Route::post('maintenance-payments', [ResidentMaintenancePaymentController::class, 'store']);
+        Route::get('maintenance-payments/{payment}', [ResidentMaintenancePaymentController::class, 'show']);
+        Route::get('payment-orders', [ResidentPaymentOrderController::class, 'index']);
+        Route::get('payment-summary', [ResidentPaymentOrderController::class, 'summary']);
+        Route::post('payment-orders/full', [ResidentPaymentOrderController::class, 'store']);
+        Route::get('payment-orders/{paymentOrder}', [ResidentPaymentOrderController::class, 'show']);
+        Route::post('payment-orders/{paymentOrder}/checkout', [ResidentPaymentOrderController::class, 'checkout']);
+        Route::post('payment-orders/{paymentOrder}/confirm-demo', [ResidentPaymentOrderController::class, 'confirmDemo']);
+        Route::get('payment-orders/{paymentOrder}/receipt', [ResidentPaymentOrderController::class, 'receipt']);
+        Route::patch('payment-orders/{paymentOrder}/cancel', [ResidentPaymentOrderController::class, 'cancel']);
+        Route::get('complaints', [ComplaintController::class, 'index']);
+        Route::post('complaints', [ComplaintController::class, 'store']);
+        Route::get('complaints/{complaint}', [ComplaintController::class, 'show']);
+        Route::get('notices', [NoticeController::class, 'index']);
+        Route::get('notices/{notice}', [NoticeController::class, 'show']);
+        Route::get('parking-slots', [ParkingController::class, 'index']);
+        Route::get('amenity-bookings', [AmenityController::class, 'bookings']);
+        Route::post('amenity-bookings', [AmenityController::class, 'book']);
+        Route::patch('amenity-bookings/{booking}/cancel', [AmenityController::class, 'cancel']);
+    });
+
+    Route::middleware('role:STAFF')->prefix('staff')->group(function (): void {
+        Route::get('dashboard', StaffDashboardController::class);
+        Route::get('options', [SelectionOptionsController::class, 'staff']);
+        Route::get('complaints', [ComplaintController::class, 'index']);
+        Route::get('complaints/{complaint}', [ComplaintController::class, 'show']);
+        Route::patch('complaints/{complaint}', [ComplaintController::class, 'update']);
+        Route::get('parcels', [ParcelController::class, 'index']);
+        Route::post('parcels', [ParcelController::class, 'store']);
+        Route::get('parcels/{parcel}', [ParcelController::class, 'show']);
+        Route::patch('parcels/{parcel}/collect', [ParcelController::class, 'collect']);
+        Route::get('notices', [NoticeController::class, 'index']);
+        Route::get('notices/{notice}', [NoticeController::class, 'show']);
+    });
+
+    Route::middleware('role:ADMIN')->prefix('admin')->group(function (): void {
+        Route::get('options', [SelectionOptionsController::class, 'admin']);
+        Route::get('dashboard', AdminDashboardController::class);
+        Route::get('reports', AdminReportController::class);
+        Route::apiResource('residents', ResidentController::class);
+        Route::apiResource('flats', FlatController::class);
+        Route::get('visitors', [AdminVisitorController::class, 'index']);
+        Route::get('visitors/{visitor}', [AdminVisitorController::class, 'show']);
+        Route::apiResource('maintenance-bills', AdminMaintenanceBillController::class);
+        Route::get('maintenance-collection', [AdminMaintenanceBillController::class, 'collection']);
+        Route::get('maintenance-payments', [AdminMaintenancePaymentController::class, 'index']);
+        Route::post('maintenance-payments', [AdminMaintenancePaymentController::class, 'store']);
+        Route::get('maintenance-payments/{payment}', [AdminMaintenancePaymentController::class, 'show']);
+        Route::patch('maintenance-payments/{payment}/status', [AdminMaintenancePaymentController::class, 'transition']);
+        Route::get('payment-orders', [AdminPaymentOrderController::class, 'index']);
+        Route::get('payment-orders/{paymentOrder}', [AdminPaymentOrderController::class, 'show']);
+        Route::get('payment-orders/{paymentOrder}/receipt', [AdminPaymentOrderController::class, 'receipt']);
+        Route::patch('payment-orders/{paymentOrder}/status', [AdminPaymentOrderController::class, 'transition']);
+        Route::get('complaints', [ComplaintController::class, 'index']);
+        Route::get('complaints/{complaint}', [ComplaintController::class, 'show']);
+        Route::patch('complaints/{complaint}', [ComplaintController::class, 'update']);
+        Route::apiResource('notices', NoticeController::class)->except('destroy');
+        Route::patch('staff-members/{staffMember}/status', [AdminStaffMemberController::class, 'updateStatus']);
+        Route::apiResource('staff-members', AdminStaffMemberController::class)->except('destroy');
+        Route::apiResource('parking-slots', ParkingController::class)->except('destroy');
+        Route::apiResource('amenities', AmenityController::class)->except(['show', 'destroy']);
+        Route::get('amenity-bookings', [AmenityController::class, 'bookings']);
+        Route::patch('amenity-bookings/{booking}/cancel', [AmenityController::class, 'cancel']);
+        Route::patch('amenity-bookings/{booking}/status', [AmenityController::class, 'updateStatus']);
+        Route::get('parcels', [ParcelController::class, 'index']);
+        Route::post('parcels', [ParcelController::class, 'store']);
+        Route::get('parcels/{parcel}', [ParcelController::class, 'show']);
+        Route::patch('parcels/{parcel}/collect', [ParcelController::class, 'collect']);
+    });
+
+    Route::middleware('role:RESIDENT')->prefix('resident')->group(function (): void {
+        Route::get('parcels', [ParcelController::class, 'index']);
+        Route::get('parcels/{parcel}', [ParcelController::class, 'show']);
+    });
+
+    Route::middleware('role:SECURITY')->prefix('security')->group(function (): void {
+        Route::get('parcels', [ParcelController::class, 'index']);
+        Route::post('parcels', [ParcelController::class, 'store']);
+        Route::get('parcels/{parcel}', [ParcelController::class, 'show']);
+        Route::patch('parcels/{parcel}/collect', [ParcelController::class, 'collect']);
+        Route::get('notices', [NoticeController::class, 'index']);
+        Route::get('notices/{notice}', [NoticeController::class, 'show']);
+    });
+});
