@@ -12,6 +12,7 @@ use App\Models\MaintenancePayment;
 use App\Services\Maintenance\MaintenanceService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Gate;
@@ -83,5 +84,23 @@ class AdminMaintenanceBillController extends Controller
         Gate::authorize('manage', MaintenanceBill::class);
 
         return response()->json(['data' => $this->maintenance->collectionSummary()]);
+    }
+
+    public function generate(Request $request): JsonResponse
+    {
+        Gate::authorize('manage', MaintenanceBill::class);
+        $data = $request->validate([
+            'month' => ['nullable', 'date_format:Y-m'],
+            'amount' => ['nullable', 'numeric', 'min:0'],
+        ]);
+        $month = $data['month'] ?? null;
+        $amount = isset($data['amount']) ? (float) $data['amount'] : null;
+
+        $result = $this->maintenance->generateMonthlyInvoices($month, $amount);
+
+        return response()->json([
+            'message' => 'Monthly maintenance generation completed.',
+            'data' => $result,
+        ]);
     }
 }

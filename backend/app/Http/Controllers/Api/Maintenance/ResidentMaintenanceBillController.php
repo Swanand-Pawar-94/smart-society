@@ -8,6 +8,8 @@ use App\Http\Resources\Api\Maintenance\MaintenanceBillResource;
 use App\Models\MaintenanceBill;
 use App\Models\MaintenancePayment;
 use App\Models\Resident;
+use App\Services\Maintenance\InvoiceDataService;
+use App\Services\Maintenance\MaintenanceService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -15,9 +17,15 @@ use Illuminate\Support\Facades\Gate;
 
 class ResidentMaintenanceBillController extends Controller
 {
+    public function __construct(
+        private readonly MaintenanceService $maintenance,
+        private readonly InvoiceDataService $invoices,
+    ) {}
+
     public function index(ListBillsRequest $request): AnonymousResourceCollection
     {
         Gate::authorize('viewAny', MaintenanceBill::class);
+        $this->maintenance->syncOverdueBills();
         $resident = $this->currentResident($request);
         $filters = $request->validated();
 
@@ -48,6 +56,7 @@ class ResidentMaintenanceBillController extends Controller
         $paid = $bill->payments->where('status', MaintenancePayment::STATUS_COMPLETED)->sum('amount');
         $bill->paid_amount = $paid;
         $bill->outstanding_amount = max(0, (float) $bill->amount - $paid);
+        $bill->setAttribute('invoice_details', $this->invoices->forResident($bill, $this->currentResident($request)));
 
         return new MaintenanceBillResource($bill);
     }

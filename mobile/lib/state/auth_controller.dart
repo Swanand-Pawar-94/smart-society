@@ -3,8 +3,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../models/session.dart';
 import '../services/api_service.dart';
+import '../services/notification_service.dart';
 
 class AuthController extends ChangeNotifier {
+
   AuthController(this._api) {
     _api.onUnauthorized = _clearExpiredSession;
   }
@@ -17,6 +19,8 @@ class AuthController extends ChangeNotifier {
   String? message;
 
   Future<void> restore() async {
+    // Perform startup health check connectivity test
+    await _api.testHealthCheck();
     final token = await _storage.read(key: 'auth_token');
     if (token != null) {
       _api.token = token;
@@ -26,6 +30,12 @@ class AuthController extends ChangeNotifier {
             token: token,
             user: AppUser.fromJson(
                 (json['data'] ?? json['user']) as Map<String, dynamic>));
+        // Register push notification device token
+        NotificationService.instance.registerDeviceToken(
+          _api,
+          userId: session?.user.id.toString(),
+          userEmail: session?.user.email,
+        );
       } on ApiException {
         await _storage.delete(key: 'auth_token');
         _api.token = null;
@@ -34,6 +44,7 @@ class AuthController extends ChangeNotifier {
     loading = false;
     notifyListeners();
   }
+
 
   Future<void> _clearExpiredSession() async {
     await _storage.delete(key: 'auth_token');
@@ -65,6 +76,12 @@ class AuthController extends ChangeNotifier {
       } else {
         await _storage.delete(key: 'auth_token');
       }
+      // Register FCM device token
+      NotificationService.instance.registerDeviceToken(
+        _api,
+        userId: session?.user.id.toString(),
+        userEmail: session?.user.email,
+      );
       notifyListeners();
       return true;
     } on ApiException catch (e) {
@@ -107,6 +124,8 @@ class AuthController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    // Unregister device token
+    await NotificationService.instance.unregisterDeviceToken(_api);
     try {
       await _api.post('auth/logout', {});
     } on ApiException {
@@ -119,4 +138,5 @@ class AuthController extends ChangeNotifier {
     error = null;
     notifyListeners();
   }
+
 }

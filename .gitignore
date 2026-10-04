@@ -1,0 +1,33 @@
+# Environment and Local Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+
+# IDE & OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs & Cache
+*.log
+backend/storage/logs/*.log
+backend/storage/framework/cache/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*

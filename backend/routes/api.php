@@ -12,21 +12,69 @@ use App\Http\Controllers\Api\Maintenance\AdminMaintenanceBillController;
 use App\Http\Controllers\Api\Maintenance\AdminMaintenancePaymentController;
 use App\Http\Controllers\Api\Maintenance\AdminPaymentOrderController;
 use App\Http\Controllers\Api\Maintenance\ResidentMaintenanceBillController;
+use App\Http\Controllers\Api\Maintenance\ResidentMaintenanceController;
 use App\Http\Controllers\Api\Maintenance\ResidentMaintenancePaymentController;
 use App\Http\Controllers\Api\Maintenance\ResidentPaymentOrderController;
+use App\Http\Controllers\Api\Maintenance\ResidentTransactionHistoryController;
 use App\Http\Controllers\Api\Messaging\MessagingController;
 use App\Http\Controllers\Api\Notices\NoticeController;
 use App\Http\Controllers\Api\Notifications\NotificationController;
 use App\Http\Controllers\Api\Options\SelectionOptionsController;
 use App\Http\Controllers\Api\Parcels\ParcelController;
 use App\Http\Controllers\Api\Parking\ParkingController;
+use App\Http\Controllers\Api\Payment\PaymentGatewayController;
 use App\Http\Controllers\Api\Reports\AdminReportController;
 use App\Http\Controllers\Api\Residents\ResidentController;
 use App\Http\Controllers\Api\Staff\AdminStaffMemberController;
 use App\Http\Controllers\Api\Visitors\AdminVisitorController;
 use App\Http\Controllers\Api\Visitors\ResidentVisitorController;
 use App\Http\Controllers\Api\Visitors\SecurityVisitorController;
+use App\Http\Controllers\Api\Visitors\VisitorRequestController;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
+
+Route::get('health', function () {
+    try {
+        $database = DB::connection()->getDatabaseName();
+    } catch (\Throwable $e) {
+        $database = 'disconnected';
+    }
+
+    return response()->json([
+        'status'    => 'ok',
+        'message'   => 'Smart Society API is running',
+        'service'   => 'Smart Society API',
+        'timestamp' => now()->toISOString(),
+        'database'  => $database,
+    ]);
+});
+
+// Simple ping endpoint — test this from the Android phone browser first
+// URL: http://192.168.29.18:8000/api/ping
+Route::get('ping', function () {
+    return response()->json([
+        'success'        => true,
+        'message'        => 'Phone can reach Laravel server',
+        'server_time'    => now()->toISOString(),
+        'server_ip'      => request()->server('SERVER_ADDR'),
+        'client_ip'      => request()->ip(),
+        'host_header'    => request()->header('host'),
+    ]);
+});
+
+// Debug info — shows exactly what the server sees about the incoming request
+Route::get('debug-info', function () {
+    return response()->json([
+        'server_addr'    => request()->server('SERVER_ADDR'),
+        'server_port'    => request()->server('SERVER_PORT'),
+        'client_ip'      => request()->ip(),
+        'forwarded_for'  => request()->header('X-Forwarded-For'),
+        'host'           => request()->header('host'),
+        'user_agent'     => request()->header('User-Agent'),
+        'request_uri'    => request()->server('REQUEST_URI'),
+    ]);
+});
+
 
 Route::prefix('auth')->group(function (): void {
     Route::post('login', [AuthController::class, 'login']);
@@ -42,9 +90,20 @@ Route::prefix('auth')->group(function (): void {
 });
 
 Route::middleware('auth:sanctum')->group(function (): void {
+    // FCM device token registration (canonical endpoint)
+    Route::post('device-tokens', [\App\Http\Controllers\Api\Devices\DeviceTokenController::class, 'store']);
+    Route::delete('device-tokens', [\App\Http\Controllers\Api\Devices\DeviceTokenController::class, 'destroy']);
+
+    // FCM token alias — accepts both "token" and "fcm_token" fields (same handler)
+    Route::post('fcm-token', [\App\Http\Controllers\Api\Devices\DeviceTokenController::class, 'store']);
+
+    // Visitor request test endpoint — any authenticated user (resident, security, admin)
+    // Triggers FCM push notification to the resident's device for end-to-end testing
+    Route::post('visitor-requests', [VisitorRequestController::class, 'store']);
     Route::get('notifications', [NotificationController::class, 'index']);
-    Route::patch('notifications/{notification}/read', [NotificationController::class, 'read']);
-    Route::patch('notifications/read-all', [NotificationController::class, 'readAll']);
+    Route::get('notifications/unread-count', [NotificationController::class, 'unreadCount']);
+    Route::match(['patch', 'post'], 'notifications/{notification}/read', [NotificationController::class, 'read']);
+    Route::match(['patch', 'post'], 'notifications/read-all', [NotificationController::class, 'readAll']);
     Route::get('conversations', [MessagingController::class, 'index']);
     Route::post('conversations', [MessagingController::class, 'store']);
     Route::get('conversations/{conversation}', [MessagingController::class, 'show']);
@@ -83,14 +142,22 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::get('payment-orders', [ResidentPaymentOrderController::class, 'index']);
         Route::get('payment-summary', [ResidentPaymentOrderController::class, 'summary']);
         Route::post('payment-orders/full', [ResidentPaymentOrderController::class, 'store']);
+        Route::post('payments/create-order', [PaymentGatewayController::class, 'createOrder']);
+        Route::post('payments/verify', [PaymentGatewayController::class, 'verify']);
         Route::get('payment-orders/{paymentOrder}', [ResidentPaymentOrderController::class, 'show']);
+        Route::patch('payment-orders/{paymentOrder}/cancel', [ResidentPaymentOrderController::class, 'cancel']);
         Route::post('payment-orders/{paymentOrder}/checkout', [ResidentPaymentOrderController::class, 'checkout']);
         Route::post('payment-orders/{paymentOrder}/confirm-demo', [ResidentPaymentOrderController::class, 'confirmDemo']);
         Route::get('payment-orders/{paymentOrder}/receipt', [ResidentPaymentOrderController::class, 'receipt']);
-        Route::patch('payment-orders/{paymentOrder}/cancel', [ResidentPaymentOrderController::class, 'cancel']);
+        Route::get('maintenance-history', [ResidentMaintenanceController::class, 'history']);
+        Route::get('payment-history', [ResidentMaintenanceController::class, 'payments']);
+        Route::get('transaction-history', [ResidentTransactionHistoryController::class, 'index']);
+        Route::get('transaction-summary', [ResidentTransactionHistoryController::class, 'summary']);
+        Route::get('transaction-category-breakdown', [ResidentTransactionHistoryController::class, 'categoryBreakdown']);
         Route::get('complaints', [ComplaintController::class, 'index']);
         Route::post('complaints', [ComplaintController::class, 'store']);
         Route::get('complaints/{complaint}', [ComplaintController::class, 'show']);
+        Route::match(['put', 'patch'], 'complaints/{complaint}', [ComplaintController::class, 'update']);
         Route::get('notices', [NoticeController::class, 'index']);
         Route::get('notices/{notice}', [NoticeController::class, 'show']);
         Route::get('parking-slots', [ParkingController::class, 'index']);
@@ -104,7 +171,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::get('options', [SelectionOptionsController::class, 'staff']);
         Route::get('complaints', [ComplaintController::class, 'index']);
         Route::get('complaints/{complaint}', [ComplaintController::class, 'show']);
-        Route::patch('complaints/{complaint}', [ComplaintController::class, 'update']);
+        Route::match(['put', 'patch'], 'complaints/{complaint}', [ComplaintController::class, 'update']);
         Route::get('parcels', [ParcelController::class, 'index']);
         Route::post('parcels', [ParcelController::class, 'store']);
         Route::get('parcels/{parcel}', [ParcelController::class, 'show']);
@@ -123,6 +190,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::get('visitors/{visitor}', [AdminVisitorController::class, 'show']);
         Route::apiResource('maintenance-bills', AdminMaintenanceBillController::class);
         Route::get('maintenance-collection', [AdminMaintenanceBillController::class, 'collection']);
+        Route::post('maintenance-generate', [AdminMaintenanceBillController::class, 'generate']);
         Route::get('maintenance-payments', [AdminMaintenancePaymentController::class, 'index']);
         Route::post('maintenance-payments', [AdminMaintenancePaymentController::class, 'store']);
         Route::get('maintenance-payments/{payment}', [AdminMaintenancePaymentController::class, 'show']);
@@ -133,7 +201,7 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::patch('payment-orders/{paymentOrder}/status', [AdminPaymentOrderController::class, 'transition']);
         Route::get('complaints', [ComplaintController::class, 'index']);
         Route::get('complaints/{complaint}', [ComplaintController::class, 'show']);
-        Route::patch('complaints/{complaint}', [ComplaintController::class, 'update']);
+        Route::match(['put', 'patch'], 'complaints/{complaint}', [ComplaintController::class, 'update']);
         Route::apiResource('notices', NoticeController::class)->except('destroy');
         Route::patch('staff-members/{staffMember}/status', [AdminStaffMemberController::class, 'updateStatus']);
         Route::apiResource('staff-members', AdminStaffMemberController::class)->except('destroy');
@@ -162,3 +230,6 @@ Route::middleware('auth:sanctum')->group(function (): void {
         Route::get('notices/{notice}', [NoticeController::class, 'show']);
     });
 });
+
+Route::post('webhooks/razorpay', [PaymentGatewayController::class, 'webhook']);
+

@@ -21,6 +21,27 @@ Laravel is a web application framework with expressive, elegant syntax. We belie
 
 Laravel is accessible, powerful, and provides tools required for large, robust applications.
 
+## Smart Society maintenance scheduler
+
+Monthly maintenance invoices are generated automatically on the first day of
+each month at 00:00 by `maintenance:generate` (configured in
+`routes/console.php`). Keep Laravel's scheduler running in production with:
+
+```bash
+php artisan schedule:work
+```
+
+For development or a controlled backfill, run the idempotent command manually:
+
+```bash
+php artisan maintenance:generate --month=2026-08
+```
+
+The generator bills only occupied flats that have residents. The database's
+`(flat_id, billing_month)` unique constraint prevents duplicate invoices when
+the command is run more than once. Set `MONTHLY_MAINTENANCE_AMOUNT` in `.env`
+to configure the default base maintenance amount.
+
 ## Learning Laravel
 
 Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.

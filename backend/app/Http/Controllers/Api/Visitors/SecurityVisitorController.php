@@ -55,11 +55,17 @@ class SecurityVisitorController extends Controller
     private function filteredVisitors(ListVisitorsRequest $request): Builder
     {
         $filters = $request->validated();
+        $isEligibleForCheckIn = $request->boolean('eligible_for_check_in');
 
         return Visitor::query()
             ->with('flat')
             ->search($filters['q'] ?? null)
-            ->when($filters['approval_status'] ?? null, fn (Builder $query, string $status) => $query->where('approval_status', $status))
+            ->when($isEligibleForCheckIn, function (Builder $query): void {
+                $query->where('approval_status', Visitor::APPROVAL_APPROVED)
+                    ->whereNull('entered_at')
+                    ->whereIn('entry_status', [Visitor::ENTRY_EXPECTED, Visitor::ENTRY_WAITING]);
+            })
+            ->when(! $isEligibleForCheckIn && isset($filters['approval_status']), fn (Builder $query) => $query->where('approval_status', $filters['approval_status']))
             ->when($filters['entry_status'] ?? null, fn (Builder $query, string $status) => $query->where('entry_status', $status))
             ->when($filters['visitor_type'] ?? null, fn (Builder $query, string $type) => $query->where('visitor_type', $type))
             ->when($filters['flat_id'] ?? null, fn (Builder $query, int $flatId) => $query->where('flat_id', $flatId));

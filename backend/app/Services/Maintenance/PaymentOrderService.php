@@ -9,12 +9,17 @@ use App\Models\PaymentOrderItem;
 use App\Models\PaymentReceipt;
 use App\Models\Resident;
 use App\Notifications\SocietyAlert;
+use App\Services\Payment\RazorpayGatewayService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class PaymentOrderService
 {
+    public function __construct(
+        private readonly RazorpayGatewayService $razorpay = new RazorpayGatewayService(),
+    ) {}
+
     /**
      * Generates a deterministic demo reference for a given order so repeated
      * calls to confirmDemo produce the same reference and are idempotent via
@@ -26,10 +31,10 @@ class PaymentOrderService
     }
 
     /**
-     * Returns the only client-facing due summary. Every amount is calculated
+     * Returns the client-facing due summary. Every amount is calculated
      * from bills and completed payments on the server.
      */
-    public function summary(Resident $resident): array
+    public function summary(Resident $resident, ?array $billIds = null): array
     {
         $currentMonth = now()->startOfMonth();
         $items = MaintenanceBill::query()
@@ -39,6 +44,7 @@ class PaymentOrderService
             ], 'amount')
             ->where('flat_id', $resident->flat_id)
             ->whereNotIn('status', [MaintenanceBill::STATUS_CANCELLED])
+            ->when($billIds !== null, fn ($query) => $query->whereIn('id', $billIds))
             ->orderBy('billing_month')
             ->get()
             ->map(function (MaintenanceBill $bill): array {
@@ -88,27 +94,52 @@ class PaymentOrderService
     }
 
     /**
-     * Creates one server-calculated order for every outstanding bill of the
-     * authenticated resident. It is intentionally not a payment confirmation.
+     * Creates one server-calculated order for outstanding bills of the
+     * authenticated resident. In demo mode (PAYMENT_MODE=demo), it immediately
+     * confirms the order, marks all included bills paid, and generates a receipt.
      */
-    public function initiateFullPayment(Resident $resident, string $method): PaymentOrder
+    public function initiateFullPayment(Resident $resident, string $method, ?array $billIds = null): PaymentOrder
     {
-        return DB::transaction(function () use ($resident, $method): PaymentOrder {
-            $existing = PaymentOrder::query()
-                ->where('resident_id', $resident->id)
-                ->whereIn('status', [PaymentOrder::STATUS_PENDING, PaymentOrder::STATUS_PROCESSING])
-                ->latest()
-                ->first();
+        return DB::transaction(function () use ($resident, $method, $billIds): PaymentOrder {
+            $isDemo = config('app.payment_mode', 'live') === 'demo';
 
-            if ($existing) {
-                return $existing->load('items.bill');
+            if ($billIds !== null) {
+                $ownedCount = MaintenanceBill::query()
+                    ->where('flat_id', $resident->flat_id)
+                    ->whereIn('id', $billIds)
+                    ->count();
+
+                if ($ownedCount !== count($billIds)) {
+                    throw ValidationException::withMessages([
+                        'maintenance_bill_ids' => 'One or more selected invoices do not belong to your flat.',
+                    ]);
+                }
+            }
+
+            if (! $isDemo) {
+                $existing = PaymentOrder::query()
+                    ->where('resident_id', $resident->id)
+                    ->whereIn('status', [PaymentOrder::STATUS_PENDING, PaymentOrder::STATUS_PROCESSING])
+                    ->latest()
+                    ->first();
+
+                if ($existing) {
+                    return $existing->load('items.bill');
+                }
             }
 
             $bills = MaintenanceBill::query()
                 ->where('flat_id', $resident->flat_id)
                 ->whereNotIn('status', [MaintenanceBill::STATUS_CANCELLED])
+                ->when($billIds !== null, fn ($query) => $query->whereIn('id', $billIds))
                 ->lockForUpdate()
                 ->get();
+
+            if ($billIds !== null && $bills->count() !== count($billIds)) {
+                throw ValidationException::withMessages([
+                    'maintenance_bill_ids' => 'One or more selected invoices do not belong to your flat.',
+                ]);
+            }
 
             $items = $bills->map(function (MaintenanceBill $bill): array {
                 $paid = (float) $bill->payments()
@@ -133,9 +164,7 @@ class PaymentOrderService
                 'amount' => $items->sum('amount'),
                 'payment_method' => $method,
                 'status' => PaymentOrder::STATUS_PENDING,
-                // A real provider fills these values later; this value makes
-                // it impossible to mistake the current local flow for a charge.
-                'provider' => 'UNCONFIGURED',
+                'provider' => $isDemo ? 'DEMO' : 'UNCONFIGURED',
                 'provider_reference' => 'ORDER-'.Str::upper(Str::random(12)),
             ]);
 
@@ -144,6 +173,42 @@ class PaymentOrderService
                     'payment_order_id' => $order->id,
                     'maintenance_bill_id' => $item['bill']->id,
                     'amount' => $item['amount'],
+                ]);
+            }
+
+            if ($isDemo) {
+                $demoRef = self::demoRef($order);
+                $this->recordVerifiedOrderPayments($order, $demoRef);
+
+                $order->update([
+                    'status' => PaymentOrder::STATUS_SUCCESSFUL,
+                    'gateway_payment_id' => $demoRef,
+                    'verification_note' => 'Confirmed via internal demo payment (PAYMENT_MODE=demo).',
+                    'verified_at' => now(),
+                ]);
+
+                PaymentReceipt::firstOrCreate(
+                    ['payment_order_id' => $order->id],
+                    [
+                        'receipt_number' => sprintf('REC-%s-%06d', now()->format('Ymd'), $order->id),
+                        'amount' => $order->amount,
+                        'currency' => 'INR',
+                        'payment_method' => $order->payment_method,
+                        'payment_reference' => $demoRef,
+                        'issued_at' => now(),
+                    ],
+                );
+
+                $order->loadMissing('resident.user');
+                $order->resident?->user?->notify(new SocietyAlert(
+                    'payment_successful',
+                    'Payment successful',
+                    'Your maintenance payment has been confirmed (demo mode).',
+                    ['payment_order_id' => $order->id, 'amount' => (float) $order->amount],
+                ));
+
+                return $order->fresh([
+                    'resident.user', 'flat', 'items.bill', 'maintenancePayments.bill', 'receipt',
                 ]);
             }
 
@@ -162,7 +227,7 @@ class PaymentOrderService
      * recordVerifiedOrderPayments() path used by the admin transition, so the
      * database remains fully consistent.
      *
-     * @throws \Illuminate\Validation\ValidationException
+     * @throws ValidationException
      */
     public function confirmDemo(PaymentOrder $paymentOrder, int $residentId): PaymentOrder
     {
@@ -198,21 +263,21 @@ class PaymentOrderService
             $this->recordVerifiedOrderPayments($order, $demoRef);
 
             $order->update([
-                'status'             => PaymentOrder::STATUS_SUCCESSFUL,
+                'status' => PaymentOrder::STATUS_SUCCESSFUL,
                 'gateway_payment_id' => $demoRef,
-                'verification_note'  => 'Confirmed via internal demo payment (PAYMENT_MODE=demo).',
-                'verified_at'        => now(),
+                'verification_note' => 'Confirmed via internal demo payment (PAYMENT_MODE=demo).',
+                'verified_at' => now(),
             ]);
 
             PaymentReceipt::firstOrCreate(
                 ['payment_order_id' => $order->id],
                 [
-                    'receipt_number'   => sprintf('REC-%s-%06d', now()->format('Ymd'), $order->id),
-                    'amount'           => $order->amount,
-                    'currency'         => 'INR',
-                    'payment_method'   => $order->payment_method,
+                    'receipt_number' => sprintf('REC-%s-%06d', now()->format('Ymd'), $order->id),
+                    'amount' => $order->amount,
+                    'currency' => 'INR',
+                    'payment_method' => $order->payment_method,
                     'payment_reference' => $demoRef,
-                    'issued_at'        => now(),
+                    'issued_at' => now(),
                 ],
             );
 
@@ -390,4 +455,303 @@ class PaymentOrderService
     {
         return (float) $item['bill']->{$component} * (float) $item['factor'];
     }
+
+    /**
+     * Creates a Razorpay checkout order for a single selected invoice.
+     * Validates flat ownership, computes exact outstanding balance on the server,
+     * and returns the checkout payload.
+     *
+     * @throws ValidationException
+     */
+    public function createRazorpayOrderForBill(Resident $resident, int $billId, string $method = MaintenancePayment::METHOD_UPI): array
+    {
+        return DB::transaction(function () use ($resident, $billId, $method): array {
+            $bill = MaintenanceBill::query()
+                ->where('id', $billId)
+                ->where('flat_id', $resident->flat_id)
+                ->whereNotIn('status', [MaintenanceBill::STATUS_CANCELLED])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $bill) {
+                throw ValidationException::withMessages([
+                    'maintenance_bill_id' => 'The selected invoice is invalid or does not belong to your flat.',
+                ]);
+            }
+
+            $paid = (float) $bill->payments()
+                ->where('status', MaintenancePayment::STATUS_COMPLETED)
+                ->sum('amount');
+            $outstanding = max(0, (float) $bill->amount - $paid);
+
+            if ($outstanding <= 0.0) {
+                throw ValidationException::withMessages([
+                    'payment' => 'This invoice is already paid.',
+                ]);
+            }
+
+            // Create internal PaymentOrder tracking record
+            $order = PaymentOrder::create([
+                'resident_id' => $resident->id,
+                'flat_id' => $resident->flat_id,
+                'amount' => $outstanding,
+                'payment_method' => $method,
+                'status' => PaymentOrder::STATUS_PENDING,
+                'provider' => 'RAZORPAY',
+                'provider_reference' => 'TEMP-' . Str::upper(Str::random(12)),
+            ]);
+
+            PaymentOrderItem::create([
+                'payment_order_id' => $order->id,
+                'maintenance_bill_id' => $bill->id,
+                'amount' => $outstanding,
+            ]);
+
+            $receiptRef = sprintf('INV-%s-%06d', $bill->billing_month?->format('Ym') ?? 'DUE', $bill->id);
+            $monthName = $bill->billing_month?->format('F Y') ?? 'Maintenance';
+
+            $razorpayOrder = $this->razorpay->createOrder(
+                $outstanding,
+                $receiptRef,
+                [
+                    'payment_order_id' => $order->id,
+                    'maintenance_bill_id' => $bill->id,
+                    'resident_id' => $resident->id,
+                    'flat_id' => $resident->flat_id,
+                ]
+            );
+
+            $order->update([
+                'provider_reference' => $razorpayOrder['id'],
+            ]);
+
+            $resident->loadMissing(['user', 'flat']);
+            $societyName = config('society.name') ?: config('app.name', 'Kasliwal Marvel (West)');
+
+            return [
+                'order_id' => $razorpayOrder['id'],
+                'amount' => (int) round($outstanding * 100),
+                'amount_formatted' => $outstanding,
+                'currency' => 'INR',
+                'key_id' => $this->razorpay->getKeyId(),
+                'name' => $societyName,
+                'description' => "Maintenance · {$monthName}",
+                'prefill' => [
+                    'name' => $resident->user?->name ?? '',
+                    'email' => $resident->user?->email ?? '',
+                    'contact' => $resident->user?->phone ?? '',
+                ],
+                'notes' => [
+                    'payment_order_id' => $order->id,
+                    'maintenance_bill_id' => $bill->id,
+                ],
+                'payment_order_id' => $order->id,
+                'maintenance_bill_id' => $bill->id,
+                'is_single_invoice' => true,
+            ];
+        });
+    }
+
+    /**
+     * Creates a Razorpay checkout order for all outstanding dues or selected dues.
+     *
+     * @throws ValidationException
+     */
+    public function createRazorpayOrderForAll(Resident $resident, string $method = MaintenancePayment::METHOD_UPI, ?array $billIds = null): array
+    {
+        return DB::transaction(function () use ($resident, $method, $billIds): array {
+            if ($billIds !== null) {
+                $ownedCount = MaintenanceBill::query()
+                    ->where('flat_id', $resident->flat_id)
+                    ->whereIn('id', $billIds)
+                    ->count();
+
+                if ($ownedCount !== count($billIds)) {
+                    throw ValidationException::withMessages([
+                        'maintenance_bill_ids' => 'One or more selected invoices do not belong to your flat.',
+                    ]);
+                }
+            }
+
+            $bills = MaintenanceBill::query()
+                ->where('flat_id', $resident->flat_id)
+                ->whereNotIn('status', [MaintenanceBill::STATUS_CANCELLED])
+                ->when($billIds !== null, fn ($query) => $query->whereIn('id', $billIds))
+                ->lockForUpdate()
+                ->get();
+
+            $items = $bills->map(function (MaintenanceBill $bill): array {
+                $paid = (float) $bill->payments()
+                    ->where('status', MaintenancePayment::STATUS_COMPLETED)
+                    ->sum('amount');
+
+                return [
+                    'bill' => $bill,
+                    'amount' => max(0, (float) $bill->amount - $paid),
+                ];
+            })->filter(fn (array $item) => $item['amount'] > 0)->values();
+
+            if ($items->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'payment' => 'There are no outstanding dues to pay.',
+                ]);
+            }
+
+            $totalAmount = (float) $items->sum('amount');
+
+            $order = PaymentOrder::create([
+                'resident_id' => $resident->id,
+                'flat_id' => $resident->flat_id,
+                'amount' => $totalAmount,
+                'payment_method' => $method,
+                'status' => PaymentOrder::STATUS_PENDING,
+                'provider' => 'RAZORPAY',
+                'provider_reference' => 'TEMP-' . Str::upper(Str::random(12)),
+            ]);
+
+            foreach ($items as $item) {
+                PaymentOrderItem::create([
+                    'payment_order_id' => $order->id,
+                    'maintenance_bill_id' => $item['bill']->id,
+                    'amount' => $item['amount'],
+                ]);
+            }
+
+            $receiptRef = sprintf('FULL-ORDER-%06d', $order->id);
+
+            $razorpayOrder = $this->razorpay->createOrder(
+                $totalAmount,
+                $receiptRef,
+                [
+                    'payment_order_id' => $order->id,
+                    'resident_id' => $resident->id,
+                    'bill_count' => $items->count(),
+                ]
+            );
+
+            $order->update([
+                'provider_reference' => $razorpayOrder['id'],
+            ]);
+
+            $resident->loadMissing(['user', 'flat']);
+            $societyName = config('society.name') ?: config('app.name', 'Kasliwal Marvel (West)');
+
+            return [
+                'order_id' => $razorpayOrder['id'],
+                'amount' => (int) round($totalAmount * 100),
+                'amount_formatted' => $totalAmount,
+                'currency' => 'INR',
+                'key_id' => $this->razorpay->getKeyId(),
+                'name' => $societyName,
+                'description' => "All Outstanding Maintenance Dues ({$items->count()} invoices)",
+                'prefill' => [
+                    'name' => $resident->user?->name ?? '',
+                    'email' => $resident->user?->email ?? '',
+                    'contact' => $resident->user?->phone ?? '',
+                ],
+                'notes' => [
+                    'payment_order_id' => $order->id,
+                    'bill_count' => $items->count(),
+                ],
+                'payment_order_id' => $order->id,
+                'is_single_invoice' => false,
+            ];
+        });
+    }
+
+    /**
+     * Verifies Razorpay payment signature and completes the payment atomically.
+     * Idempotent: If already successful, returns order details without duplicating payments.
+     *
+     * @throws ValidationException
+     */
+    public function verifyAndReconcileRazorpayPayment(
+        string $razorpayOrderId,
+        string $razorpayPaymentId,
+        string $signature,
+        ?int $residentId = null
+    ): array {
+        return DB::transaction(function () use ($razorpayOrderId, $razorpayPaymentId, $signature, $residentId): array {
+            $order = PaymentOrder::query()
+                ->where('provider_reference', $razorpayOrderId)
+                ->orWhere('id', is_numeric($razorpayOrderId) ? (int) $razorpayOrderId : 0)
+                ->with(['items.bill', 'resident.user'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $order) {
+                throw ValidationException::withMessages([
+                    'razorpay_order_id' => 'Payment order not found for the given reference.',
+                ]);
+            }
+
+            if ($residentId !== null && (int) $order->resident_id !== $residentId) {
+                throw ValidationException::withMessages([
+                    'payment' => 'You do not have permission to verify this payment order.',
+                ]);
+            }
+
+            // Idempotent: already marked successful
+            if ($order->status === PaymentOrder::STATUS_SUCCESSFUL) {
+                return [
+                    'success' => true,
+                    'message' => 'Payment has already been verified and processed.',
+                    'payment_id' => $order->gateway_payment_id ?? $razorpayPaymentId,
+                    'order' => $order->fresh(['items.bill', 'receipt']),
+                ];
+            }
+
+            // Verify cryptographic signature
+            $valid = $this->razorpay->verifyPaymentSignature($razorpayOrderId, $razorpayPaymentId, $signature);
+
+            if (! $valid) {
+                $order->update([
+                    'status' => PaymentOrder::STATUS_FAILED,
+                    'verification_note' => 'Signature verification failed.',
+                ]);
+
+                throw ValidationException::withMessages([
+                    'signature' => 'Payment signature verification failed. Please contact society administration if amount was deducted.',
+                ]);
+            }
+
+            // Record maintenance payments and update bill statuses to PAID
+            $this->recordVerifiedOrderPayments($order, $razorpayPaymentId);
+
+            $order->update([
+                'status' => PaymentOrder::STATUS_SUCCESSFUL,
+                'gateway_payment_id' => $razorpayPaymentId,
+                'verification_note' => 'Verified via Razorpay signature.',
+                'verified_at' => now(),
+            ]);
+
+            PaymentReceipt::firstOrCreate(
+                ['payment_order_id' => $order->id],
+                [
+                    'receipt_number' => sprintf('REC-%s-%06d', now()->format('Ymd'), $order->id),
+                    'amount' => $order->amount,
+                    'currency' => 'INR',
+                    'payment_method' => $order->payment_method ?: MaintenancePayment::METHOD_UPI,
+                    'payment_reference' => $razorpayPaymentId,
+                    'issued_at' => now(),
+                ],
+            );
+
+            $order->loadMissing('resident.user');
+            $order->resident?->user?->notify(new SocietyAlert(
+                'payment_successful',
+                'Payment successful',
+                sprintf('Your maintenance payment of ₹%s was completed successfully.', number_format((float) $order->amount, 2)),
+                ['payment_order_id' => $order->id, 'amount' => (float) $order->amount, 'payment_id' => $razorpayPaymentId],
+            ));
+
+            return [
+                'success' => true,
+                'message' => 'Payment verified and completed successfully.',
+                'payment_id' => $razorpayPaymentId,
+                'order' => $order->fresh(['items.bill', 'receipt']),
+            ];
+        });
+    }
 }
+

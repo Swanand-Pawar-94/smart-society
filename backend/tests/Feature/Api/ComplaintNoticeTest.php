@@ -37,6 +37,54 @@ class ComplaintNoticeTest extends TestCase
         $this->actingAs($residentUser, 'sanctum')->getJson('/api/resident/notices/'.$draft->json('data.id'))->assertOk()->assertJsonPath('data.is_published', true);
     }
 
+    public function test_resident_can_update_complaint_via_put_and_patch(): void
+    {
+        [$residentUser, $resident] = $this->resident();
+        [, $otherResident] = $this->resident();
+
+        $created = $this->actingAs($residentUser, 'sanctum')->postJson('/api/resident/complaints', [
+            'category' => 'PLUMBING',
+            'title' => 'Initial leak',
+            'description' => 'A small tap is leaking.',
+            'priority' => 'LOW',
+        ]);
+        $created->assertOk();
+        $complaintId = $created->json('data.id');
+
+        // Update via PUT
+        $putResponse = $this->actingAs($residentUser, 'sanctum')->putJson('/api/resident/complaints/'.$complaintId, [
+            'category' => 'ELECTRICITY',
+            'title' => 'Power outlet issue',
+            'description' => 'Living room outlet sparking.',
+            'priority' => 'HIGH',
+        ]);
+        $putResponse->assertOk()
+            ->assertJsonPath('data.category', 'ELECTRICITY')
+            ->assertJsonPath('data.title', 'Power outlet issue')
+            ->assertJsonPath('data.description', 'Living room outlet sparking.')
+            ->assertJsonPath('data.priority', 'HIGH');
+
+        $this->assertDatabaseHas('complaints', [
+            'id' => $complaintId,
+            'category' => 'ELECTRICITY',
+            'title' => 'Power outlet issue',
+            'priority' => 'HIGH',
+        ]);
+
+        // Update via PATCH
+        $patchResponse = $this->actingAs($residentUser, 'sanctum')->patchJson('/api/resident/complaints/'.$complaintId, [
+            'priority' => 'EMERGENCY',
+        ]);
+        $patchResponse->assertOk()
+            ->assertJsonPath('data.priority', 'EMERGENCY')
+            ->assertJsonPath('data.title', 'Power outlet issue');
+
+        // Other resident cannot update
+        $this->actingAs($otherResident->user, 'sanctum')->putJson('/api/resident/complaints/'.$complaintId, [
+            'title' => 'Hacked title',
+        ])->assertForbidden();
+    }
+
     private function resident(): array
     {
         $user = User::factory()->create(['role' => User::ROLE_RESIDENT]);

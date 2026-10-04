@@ -146,8 +146,6 @@ class VisitorManagementTest extends TestCase
 
         $this->postJson('/api/resident/visitors/pre-approvals', [
             'visitor_name' => 'Future Guest',
-            'mobile_number' => '9999999999',
-            'purpose' => 'Family visit',
             'visitor_type' => Visitor::TYPE_GUEST,
             'expected_at' => now()->addDay()->toISOString(),
         ])->assertCreated()
@@ -164,9 +162,8 @@ class VisitorManagementTest extends TestCase
 
         $this->postJson('/api/security/visitors', [
             'visitor_name' => '',
-            'mobile_number' => '',
         ])->assertUnprocessable()
-            ->assertJsonValidationErrors(['visitor_name', 'mobile_number', 'purpose', 'flat_id', 'resident_id', 'visitor_type']);
+            ->assertJsonValidationErrors(['visitor_name', 'flat_id', 'resident_id', 'visitor_type']);
     }
 
     private function user(string $role, string $email): User

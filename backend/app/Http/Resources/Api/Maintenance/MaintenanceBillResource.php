@@ -34,6 +34,10 @@ class MaintenanceBillResource extends JsonResource
                 'building' => $this->flat->building,
             ]),
             'payments' => MaintenancePaymentResource::collection($this->whenLoaded('payments')),
+            'invoice' => $this->when(
+                $this->resource->getAttribute('invoice_details') !== null,
+                fn () => $this->resource->getAttribute('invoice_details'),
+            ),
             'created_at' => $this->created_at?->toISOString(),
             'updated_at' => $this->updated_at?->toISOString(),
         ];

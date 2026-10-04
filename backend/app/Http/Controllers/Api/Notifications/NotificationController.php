@@ -14,12 +14,24 @@ class NotificationController extends Controller
         return response()->json(['data' => $request->user()->notifications()->latest()->paginate()]);
     }
 
-    public function read(Request $request, DatabaseNotification $notification): JsonResponse
+    public function unreadCount(Request $request): JsonResponse
     {
-        abort_unless($notification->notifiable_id === $request->user()->id && $notification->notifiable_type === $request->user()::class, 403);
-        $notification->markAsRead();
+        $count = $request->user()->unreadNotifications()->count();
 
-        return response()->json(['data' => $notification->fresh()]);
+        return response()->json([
+            'count' => $count,
+            'data' => [
+                'count' => $count,
+            ],
+        ]);
+    }
+
+    public function read(Request $request, string $notification): JsonResponse
+    {
+        $item = $request->user()->notifications()->where('id', $notification)->firstOrFail();
+        $item->markAsRead();
+
+        return response()->json(['data' => $item->fresh()]);
     }
 
     public function readAll(Request $request): JsonResponse

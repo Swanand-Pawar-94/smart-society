@@ -2,16 +2,121 @@
 
 namespace App\Services\Maintenance;
 
+use App\Models\Flat;
 use App\Models\MaintenanceBill;
 use App\Models\MaintenancePayment;
 use App\Models\Resident;
+use App\Notifications\SocietyAlert;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
+use Illuminate\Support\Facades\Log;
+
 class MaintenanceService
 {
+    public function generateMonthlyInvoices(?string $month = null, ?float $amount = null): array
+    {
+        $billingMonth = $month ? Carbon::parse($month)->startOfMonth() : now()->startOfMonth();
+        $dueDate = $billingMonth->copy()->addDays(15);
+        $invoiceAmount = $amount ?? (float) env('MONTHLY_MAINTENANCE_AMOUNT', 2000.00);
+
+        $flats = Flat::query()
+            ->where('occupancy_status', 'OCCUPIED')
+            ->whereHas('residents')
+            ->get();
+        $createdCount = 0;
+        $skippedCount = 0;
+        $details = [];
+
+        Log::info("Starting monthly maintenance generation for {$billingMonth->format('F Y')}", [
+            'total_occupied_flats_with_residents' => $flats->count(),
+            'amount_per_flat' => $invoiceAmount,
+        ]);
+
+        foreach ($flats as $flat) {
+            $flatIdentifier = "Flat {$flat->flat_number} (ID #{$flat->id})";
+
+            if (MaintenanceBill::query()
+                ->where('flat_id', $flat->id)
+                ->whereDate('billing_month', $billingMonth->toDateString())
+                ->exists()) {
+                $skippedCount++;
+                $reason = "Bill for {$billingMonth->format('F Y')} already exists in database.";
+                $details[] = [
+                    'flat_id' => $flat->id,
+                    'flat_number' => $flat->flat_number,
+                    'status' => 'SKIPPED',
+                    'reason' => $reason,
+                ];
+                Log::info("Skipped {$flatIdentifier}: {$reason}");
+
+                continue;
+            }
+
+            $attributes = [
+                'flat_id' => $flat->id,
+                'billing_month' => $billingMonth->toDateString(),
+                'billing_period_start' => $billingMonth->toDateString(),
+                'billing_period_end' => $billingMonth->copy()->endOfMonth()->toDateString(),
+                'due_date' => $dueDate->toDateString(),
+                'base_maintenance' => $invoiceAmount,
+                'water_charge' => 0,
+                'electricity_common_area_charge' => 0,
+                'parking_charge' => 0,
+                'other_charges' => 0,
+                'late_fee' => 0,
+                'discount' => 0,
+                'amount' => $invoiceAmount,
+                'status' => MaintenanceBill::STATUS_UNPAID,
+                'notes' => 'Automated monthly maintenance invoice for '.$billingMonth->format('F Y'),
+            ];
+
+            try {
+                $bill = MaintenanceBill::create($attributes);
+                $createdCount++;
+                $details[] = [
+                    'flat_id' => $flat->id,
+                    'flat_number' => $flat->flat_number,
+                    'status' => 'CREATED',
+                    'bill_id' => $bill->id,
+                    'amount' => $invoiceAmount,
+                ];
+                Log::info("Created monthly invoice #{$bill->id} for {$flatIdentifier} - Amount: ₹{$invoiceAmount}");
+            } catch (QueryException $exception) {
+                if (MaintenanceBill::query()
+                    ->where('flat_id', $flat->id)
+                    ->whereDate('billing_month', $billingMonth->toDateString())
+                    ->exists()) {
+                    $skippedCount++;
+                    $details[] = [
+                        'flat_id' => $flat->id,
+                        'flat_number' => $flat->flat_number,
+                        'status' => 'SKIPPED',
+                        'reason' => 'Concurrent process created bill.',
+                    ];
+
+                    continue;
+                }
+
+                Log::error("Failed creating invoice for {$flatIdentifier}: ".$exception->getMessage());
+                throw $exception;
+            }
+        }
+
+        return [
+            'billing_month' => $billingMonth->format('F Y'),
+            'created_count' => $createdCount,
+            'skipped_count' => $skippedCount,
+            'total_flats' => $flats->count(),
+            'amount_per_flat' => $invoiceAmount,
+            'details' => $details,
+        ];
+    }
+
     public function createBill(array $data): MaintenanceBill
     {
         $exists = MaintenanceBill::query()
@@ -116,8 +221,9 @@ class MaintenanceService
     }
 
     /**
-     * Creates a pending payment request for a resident. The amount is derived
-     * from the billed balance and never accepted from the mobile client.
+     * Creates a payment record for a resident. In demo mode (PAYMENT_MODE=demo),
+     * it immediately marks the payment completed and the bill paid without
+     * requiring external gateway confirmation.
      */
     public function initiateResidentPayment(Resident $resident, array $data): MaintenancePayment
     {
@@ -141,25 +247,50 @@ class MaintenanceService
                 ]);
             }
 
-            $pending = $bill->payments()
-                ->where('resident_id', $resident->id)
-                ->where('status', MaintenancePayment::STATUS_PENDING)
-                ->latest()
-                ->first();
+            $isDemo = config('app.payment_mode', 'live') === 'demo';
 
-            if ($pending) {
-                return $pending->fresh(['bill', 'resident']);
+            if (! $isDemo) {
+                $pending = $bill->payments()
+                    ->where('resident_id', $resident->id)
+                    ->where('status', MaintenancePayment::STATUS_PENDING)
+                    ->latest()
+                    ->first();
+
+                if ($pending) {
+                    return $pending->fresh(['bill', 'resident']);
+                }
             }
+
+            $referenceId = $data['reference_id'] ?? 'PAY-'.Str::upper(Str::random(12));
+            $receiptRef = $data['receipt_reference'] ?? ($isDemo ? sprintf('DEMO-%s-%06d', now()->format('Ymd'), $bill->id) : null);
 
             $payment = MaintenancePayment::create([
                 'maintenance_bill_id' => $bill->id,
                 'resident_id' => $resident->id,
                 'amount' => $outstanding,
-                'reference_id' => $data['reference_id'] ?? 'PAY-'.Str::upper(Str::random(12)),
+                'reference_id' => $referenceId,
                 'payment_method' => $data['payment_method'],
-                'status' => MaintenancePayment::STATUS_PENDING,
-                'receipt_reference' => $data['receipt_reference'] ?? null,
+                'status' => $isDemo ? MaintenancePayment::STATUS_COMPLETED : MaintenancePayment::STATUS_PENDING,
+                'paid_at' => $isDemo ? now() : null,
+                'receipt_reference' => $receiptRef,
             ]);
+
+            if ($isDemo) {
+                MaintenancePayment::query()
+                    ->where('maintenance_bill_id', $bill->id)
+                    ->where('id', '!=', $payment->id)
+                    ->where('status', MaintenancePayment::STATUS_PENDING)
+                    ->update(['status' => MaintenancePayment::STATUS_FAILED]);
+
+                $this->refreshBillStatus($bill);
+
+                $resident->user?->notify(new SocietyAlert(
+                    'payment_successful',
+                    'Payment successful',
+                    'Your maintenance payment has been completed successfully (demo mode).',
+                    ['maintenance_bill_id' => $bill->id, 'amount' => (float) $payment->amount],
+                ));
+            }
 
             return $payment->fresh(['bill', 'resident']);
         });

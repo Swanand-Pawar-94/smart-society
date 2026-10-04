@@ -168,6 +168,32 @@ class PaymentOrderTest extends TestCase
         $this->assertDatabaseCount('maintenance_payments', 0);
     }
 
+    public function test_pay_all_outstanding_dues_in_demo_mode_settles_all_invoices_immediately(): void
+    {
+        config(['app.payment_mode' => 'demo']);
+
+        $resident = $this->residentWithBills(); // has 2 bills: 1200 + 800 = 2000
+        Sanctum::actingAs($resident->user);
+
+        $response = $this->postJson('/api/resident/payment-orders/full', [
+            'payment_method' => MaintenancePayment::METHOD_UPI,
+        ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('data.amount', '2000.00')
+            ->assertJsonPath('data.status', PaymentOrder::STATUS_SUCCESSFUL);
+
+        $this->assertDatabaseHas('payment_orders', [
+            'resident_id' => $resident->id,
+            'status' => PaymentOrder::STATUS_SUCCESSFUL,
+        ]);
+
+        // All bills for flat are now PAID
+        $this->assertEquals(0, MaintenanceBill::query()->where('flat_id', $resident->flat_id)->where('status', '!=', MaintenanceBill::STATUS_PAID)->count());
+        $this->assertDatabaseCount('payment_receipts', 1);
+        $this->assertDatabaseCount('maintenance_payments', 2);
+    }
+
     private function residentWithBills(): Resident
     {
         $user = User::create([

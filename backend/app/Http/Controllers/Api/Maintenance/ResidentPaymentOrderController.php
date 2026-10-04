@@ -38,9 +38,16 @@ class ResidentPaymentOrderController extends Controller
     public function summary(Request $request): JsonResponse
     {
         Gate::authorize('viewAny', PaymentOrder::class);
+        $billIds = $request->query('maintenance_bill_ids');
+        if (is_string($billIds)) {
+            $billIds = array_filter(array_map('intval', explode(',', $billIds)));
+        }
 
         return response()->json([
-            'data' => $this->orders->summary($this->currentResident($request)),
+            'data' => $this->orders->summary(
+                $this->currentResident($request),
+                is_array($billIds) && ! empty($billIds) ? array_values($billIds) : null,
+            ),
         ]);
     }
 
@@ -57,9 +64,15 @@ class ResidentPaymentOrderController extends Controller
         Gate::authorize('create', PaymentOrder::class);
         $data = $request->validate([
             'payment_method' => ['required', Rule::in(MaintenancePayment::paymentMethods())],
+            'maintenance_bill_ids' => ['nullable', 'array', 'min:1'],
+            'maintenance_bill_ids.*' => ['integer', 'distinct', 'exists:maintenance_bills,id'],
         ]);
         $resident = $this->currentResident($request);
-        $order = $this->orders->initiateFullPayment($resident, $data['payment_method']);
+        $order = $this->orders->initiateFullPayment(
+            $resident,
+            $data['payment_method'],
+            $data['maintenance_bill_ids'] ?? null,
+        );
 
         return (new PaymentOrderResource($order))
             ->response()
@@ -79,7 +92,7 @@ class ResidentPaymentOrderController extends Controller
         if (config('app.payment_mode', 'live') !== 'demo') {
             return response()->json([
                 'message' => 'Demo payment confirmation is not enabled on this server.',
-                'code'    => 'DEMO_MODE_DISABLED',
+                'code' => 'DEMO_MODE_DISABLED',
             ], 503);
         }
 

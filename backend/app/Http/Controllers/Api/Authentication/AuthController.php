@@ -19,7 +19,9 @@ use Illuminate\Http\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Password;
+use Throwable;
 
 class AuthController extends Controller
 {
@@ -27,36 +29,72 @@ class AuthController extends Controller
     {
         $credentials = $request->validated();
         $login = $credentials['login'] ?? $credentials['email'];
-        $user = User::query()
-            ->where('email', $login)
-            ->orWhere('phone', $login)
-            ->first();
 
-        if (! $user || ! Hash::check($credentials['password'], $user->password)) {
-            return response()->json(['message' => 'The provided credentials are incorrect.'], 422);
-        }
-
-        if (($credentials['requested_role'] ?? null) && $credentials['requested_role'] !== $user->role) {
-            return response()->json(['message' => 'The selected role does not match this account.'], 403);
-        }
-
-        if ($user->hasRole(User::ROLE_STAFF, User::ROLE_SECURITY)
-            && $user->staffMember?->status === StaffMember::STATUS_INACTIVE) {
-            return response()->json([
-                'message' => 'Your account is awaiting administrator activation.',
-            ], 403);
-        }
-
-        $token = $user->createToken($credentials['device_name'] ?? 'flutter-mobile')->plainTextToken;
-
-        return response()->json([
-            'message' => 'Authenticated successfully.',
-            'data' => [
-                'token' => $token,
-                'token_type' => 'Bearer',
-                'user' => (new UserResource($user))->resolve(),
-            ],
+        Log::info('LOGIN REQUEST RECEIVED', [
+            'login' => $login,
+            'requested_role' => $credentials['requested_role'] ?? null,
+            'ip' => $request->ip(),
         ]);
+
+        try {
+            Log::info('AUTHENTICATION STARTED');
+            Log::info('DATABASE QUERY STARTED');
+
+            $user = User::query()
+                ->where('email', $login)
+                ->orWhere('phone', $login)
+                ->first();
+
+            Log::info('DATABASE QUERY COMPLETED', ['user_found' => (bool) $user]);
+
+            if (! $user || ! Hash::check($credentials['password'], $user->password)) {
+                Log::warning('LOGIN FAILED: Invalid credentials', ['login' => $login]);
+
+                return response()->json(['message' => 'The provided credentials are incorrect.'], 422);
+            }
+
+            Log::info('PASSWORD VERIFICATION COMPLETED');
+
+            if (($credentials['requested_role'] ?? null) && $credentials['requested_role'] !== $user->role) {
+                Log::warning('LOGIN FAILED: Role mismatch', [
+                    'account_role' => $user->role,
+                    'requested_role' => $credentials['requested_role'],
+                ]);
+
+                return response()->json(['message' => 'The selected role does not match this account.'], 403);
+            }
+
+            if ($user->hasRole(User::ROLE_STAFF, User::ROLE_SECURITY)
+                && $user->staffMember?->status === StaffMember::STATUS_INACTIVE) {
+                Log::warning('LOGIN FAILED: Account inactive', ['user_id' => $user->id]);
+
+                return response()->json([
+                    'message' => 'Your account is awaiting administrator activation.',
+                ], 403);
+            }
+
+            $token = $user->createToken($credentials['device_name'] ?? 'flutter-mobile')->plainTextToken;
+            Log::info('TOKEN GENERATED', ['user_id' => $user->id, 'role' => $user->role]);
+
+            $user->loadMissing(['profile', 'resident.flat', 'staffMember']);
+
+            Log::info('LOGIN RESPONSE SENT', ['user_id' => $user->id]);
+
+            return response()->json([
+                'message' => 'Authenticated successfully.',
+                'data' => [
+                    'token' => $token,
+                    'token_type' => 'Bearer',
+                    'user' => (new UserResource($user))->resolve(),
+                ],
+            ]);
+        } catch (Throwable $e) {
+            Log::error('LOGIN ERROR: ' . $e->getMessage(), ['exception' => get_class($e)]);
+
+            return response()->json([
+                'message' => 'Authentication service error: ' . $e->getMessage(),
+            ], 500);
+        }
     }
 
     /**
@@ -85,14 +123,22 @@ class AuthController extends Controller
             ]);
 
             if ($user->hasRole(User::ROLE_RESIDENT)) {
-                $flat = Flat::query()
-                    ->where('flat_number', $data['flat_number'])
-                    ->where('building', $data['building'])
-                    ->lockForUpdate()
-                    ->first();
+                $flatNumber = trim((string) $data['flat_number']);
+                $building = trim((string) $data['building']);
 
-                if (! $flat) {
-                    abort(Response::HTTP_UNPROCESSABLE_ENTITY, 'The selected flat does not exist.');
+                // Find existing flat or automatically create new flat record
+                $flat = Flat::firstOrCreate(
+                    [
+                        'flat_number' => $flatNumber,
+                        'building' => $building,
+                    ],
+                    [
+                        'occupancy_status' => 'OCCUPIED',
+                    ]
+                );
+
+                if ($flat->occupancy_status !== 'OCCUPIED') {
+                    $flat->update(['occupancy_status' => 'OCCUPIED']);
                 }
 
                 Resident::create([
@@ -101,8 +147,8 @@ class AuthController extends Controller
                     'relation_to_owner' => $data['relation_to_owner'] ?? 'TENANT',
                     'is_primary_contact' => false,
                 ]);
-                $flat->update(['occupancy_status' => 'OCCUPIED']);
-            } else {
+            }
+ else {
                 StaffMember::create([
                     'user_id' => $user->id,
                     'employee_id' => $data['employee_id'] ?? null,

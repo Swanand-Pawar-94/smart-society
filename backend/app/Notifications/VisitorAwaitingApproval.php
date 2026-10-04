@@ -19,12 +19,29 @@ class VisitorAwaitingApproval extends Notification
 
     public function toArray(object $notifiable): array
     {
+        $flatNumber = $this->visitor->flat?->flat_number;
+        $building = $this->visitor->flat?->building;
+        $location = trim(($flatNumber ? "Flat {$flatNumber}" : '').($building ? ", {$building}" : ''));
+        if (empty($location)) {
+            $location = 'your unit';
+        }
+
         return [
-            'type' => 'visitor_waiting_for_approval',
+            'type' => 'visitor_request',
+            'title' => 'Visitor Request',
+            'message' => sprintf('%s is requesting entry to %s.', $this->visitor->visitor_name, $location),
             'visitor_id' => $this->visitor->id,
+            'visitor_request_id' => $this->visitor->id,
             'visitor_name' => $this->visitor->visitor_name,
+            'visitor_type' => $this->visitor->visitor_type ?? 'GUEST',
             'flat_id' => $this->visitor->flat_id,
+            'flat_number' => $flatNumber,
+            'building' => $building,
             'purpose' => $this->visitor->purpose,
+            'approval_status' => $this->visitor->approval_status ?? 'PENDING',
+            'entry_status' => $this->visitor->entry_status ?? 'WAITING',
+            'requested_at' => now()->toISOString(),
+            'created_at' => now()->toISOString(),
         ];
     }
 }

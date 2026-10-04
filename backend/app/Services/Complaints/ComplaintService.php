@@ -44,17 +44,21 @@ class ComplaintService
     public function update(Complaint $complaint, User $user, array $data): Complaint
     {
         return DB::transaction(function () use ($complaint, $user, $data): Complaint {
-            $previousStatus = $complaint->status;
-            $updates = Arr::only($data, ['category', 'title', 'description', 'priority', 'assigned_staff_id']);
+            $isResident = $user->hasRole(User::ROLE_RESIDENT);
+            $allowedFields = $isResident
+                ? ['category', 'title', 'description', 'priority']
+                : ['category', 'title', 'description', 'priority', 'assigned_staff_id'];
+            $updates = Arr::only($data, $allowedFields);
 
-            if (array_key_exists('assigned_staff_id', $data)
+            if (! $isResident
+                && array_key_exists('assigned_staff_id', $data)
                 && $data['assigned_staff_id'] !== null
                 && ! isset($data['status'])
                 && in_array($complaint->status, [Complaint::STATUS_OPEN, Complaint::STATUS_REOPENED], true)) {
                 $updates['status'] = Complaint::STATUS_ASSIGNED;
             }
 
-            if (isset($data['status'])) {
+            if (! $isResident && isset($data['status'])) {
                 $this->ensureValidTransition($complaint->status, $data['status']);
                 $updates['status'] = $data['status'];
 

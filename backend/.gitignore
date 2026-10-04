@@ -25,3 +25,8 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Firebase service account credentials — NEVER commit to Git
+/storage/app/private/firebase-credentials.json
+firebase-credentials.json
+*-firebase-adminsdk-*.json

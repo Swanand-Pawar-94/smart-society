@@ -27,6 +27,7 @@ class ComplaintPolicy
     public function update(User $user, Complaint $complaint): bool
     {
         return $user->hasRole(User::ROLE_ADMIN)
-            || ($user->hasRole(User::ROLE_STAFF) && $user->staffMember?->id === $complaint->assigned_staff_id);
+            || ($user->hasRole(User::ROLE_STAFF) && $user->staffMember?->id === $complaint->assigned_staff_id)
+            || ($user->hasRole(User::ROLE_RESIDENT) && $user->resident?->id === $complaint->resident_id);
     }
 }

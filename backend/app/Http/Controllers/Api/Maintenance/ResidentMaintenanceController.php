@@ -26,6 +26,7 @@ class ResidentMaintenanceController extends Controller
             $paid = $bill->payments->where('status', MaintenancePayment::STATUS_COMPLETED)->sum('amount');
             $bill->paid_amount = $paid;
             $bill->outstanding_amount = max(0, (float) $bill->amount - $paid);
+
             return $bill;
         });
 
